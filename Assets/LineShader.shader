@@ -48,7 +48,7 @@ Shader "Unlit/LineShader" {
                 float factor = saturate(1 - distFromStart / _FadeDist);
 
                 float hue = i.uv.x;
-                float sat = (1 - factor) * (1 - factor) * 0.5 + 0.5;
+                float sat = min(factor, 1 - factor) * 0.8 + 0.2;
                 float val = factor * 0.5 + 0.5;
                 float alpha = lerp(_Color.a, 1, factor);
 

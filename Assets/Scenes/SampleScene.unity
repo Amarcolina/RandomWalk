@@ -159,7 +159,7 @@ Camera:
   m_Enabled: 1
   serializedVersion: 2
   m_ClearFlags: 2
-  m_BackGroundColor: {r: 0.16037738, g: 0.16037738, b: 0.16037738, a: 0}
+  m_BackGroundColor: {r: 0.09433961, g: 0.09433961, b: 0.09433961, a: 0}
   m_projectionMatrixMode: 1
   m_GateFitMode: 2
   m_FOVAxisMode: 0
@@ -186,7 +186,7 @@ Camera:
   m_TargetDisplay: 0
   m_TargetEye: 0
   m_HDR: 1
-  m_AllowMSAA: 0
+  m_AllowMSAA: 1
   m_AllowDynamicResolution: 0
   m_ForceIntoRT: 0
   m_OcclusionCulling: 0
@@ -245,6 +245,7 @@ MonoBehaviour:
   CameraZoomDelta: 1.1
   VerticesPerMesh: 32768
   Material: {fileID: 2100000, guid: 96d24e41a81ed6942b795e9dfb2e7b33, type: 2}
+  FadeTime: 1
   _meshes: []
 --- !u!4 &1177951019
 Transform:
