@@ -1,41 +1,32 @@
 using System;
-using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using Unity.Burst;
-using Unity.Burst.Intrinsics;
 using Unity.Jobs;
 using Unity.Collections;
-using Unity.Collections.LowLevel.Unsafe;
 using Unity.Mathematics;
-using static Unity.Mathematics.math;
 
 public class RandomWalk : MonoBehaviour {
 
-    public float StepsPerSecond;
-    public int Seed;
-    public bool DoShowWinding;
-    public float DistanceScale;
-    public float RelevanceScale;
+    [Header("Simulation")]
+    public float StepsPerSecond = 30;
+    public float MaxDeltaTime = 1 / 15.0f;
+
+    [Header("Rendering")]
+    public int VerticesPerMesh = 4096;
+    public Material Material;
+    public float FadeTime = 1;
 
     [Header("Camera")]
     public Camera Camera;
     public float CameraPositionLerp;
     public float CameraZoomDelta;
 
-    [Header("Meshes")]
-    public int VerticesPerMesh = 4096;
-    public Material Material;
-    public float FadeTime = 1;
+    [Header("Runtime")]
+    public List<Mesh> Meshes = new List<Mesh>();
+    public Mesh CurrentMesh = null;
 
     private RandomWalkJob _job;
-
-    
-    [Header("Runtime")]
-    [SerializeField]
-    private List<Mesh> _meshes = new List<Mesh>();
-    private Mesh _currentMesh = null;
-
     private float _stepsToTake = 0;
 
     private List<Vector3> _vertices = new List<Vector3>();
@@ -44,114 +35,113 @@ public class RandomWalk : MonoBehaviour {
 
     private void OnEnable() {
         _job = new RandomWalkJob() {
-            Map = new Map() { HashMap = new NativeHashMap<int2, Cell>(128, Allocator.Persistent) },
+            Map = new Map(Allocator.Persistent),
             Directions = new NativeArray<int2>(new int2[] {
                 new int2(1, 0),
                 new int2(0, 1),
                 new int2(-1, 0),
                 new int2(0, -1)
             }, Allocator.Persistent),
-            ValidWindings = new NativeArray<int>(4, Allocator.Persistent),
-            Position = new NativeArray<int2>(1, Allocator.Persistent),
-            Winding = new NativeArray<int>(1, Allocator.Persistent),
-            Distance = new NativeArray<int>(1, Allocator.Persistent),
             AddedElements = new NativeList<Element>(Allocator.Persistent),
+            StateRef = new NativeReference<SimState>(Allocator.Persistent),
         };
+
+        ResetState();
     }
 
     private void OnDisable() {
-        _job.Map.HashMap.Dispose();
+        _job.Map.Dispose();
         _job.Directions.Dispose();
-        _job.ValidWindings.Dispose();
-        _job.Position.Dispose();
-        _job.Winding.Dispose();
-        _job.Distance.Dispose();
         _job.AddedElements.Dispose();
+        _job.StateRef.Dispose();
+    }
+
+    private void ResetState() {
+        _job.Map.Clear();
+        _job.AddedElements.Clear();
+        _job.StateRef.Value = new SimState() {
+            Position = new int2(0, 0),
+            Distance = 0,
+            Winding = 0,
+            R = Unity.Mathematics.Random.CreateFromIndex((uint)DateTime.Now.GetHashCode())
+        };
+
+        foreach (var mesh in Meshes) {
+            DestroyImmediate(mesh);
+        }
+        Meshes.Clear();
     }
 
     private void Update() {
         if (Input.GetKeyDown(KeyCode.Space)) {
-            _job.Map.HashMap.Clear();
-            _job.Position[0] = new int2(0, 0);
-            _job.Winding[0] = 0;
-            _job.Distance[0] = 0;
-
-            foreach (var mesh in _meshes) {
-                DestroyImmediate(mesh);
-            }
-            _meshes.Clear();
-
-            _job.AddedElements.Clear();
+            ResetState();
         }
 
-        _stepsToTake += StepsPerSecond * Time.deltaTime;
+        Simulate();
+
+        Render();
+    }
+
+    private void Simulate() {
+        _stepsToTake += StepsPerSecond * Mathf.Min(MaxDeltaTime, Time.deltaTime);
         int stepsInt = (int)_stepsToTake;
         _stepsToTake -= stepsInt;
 
-        if (stepsInt != 0) {
+        if (stepsInt > 0) {
             _job.StepsToTake = stepsInt;
-            _job.R = Unity.Mathematics.Random.CreateFromIndex((uint)(Seed + Time.frameCount));
             _job.Run();
 
-            if (_currentMesh == null) {
-                _currentMesh = new Mesh();
-                _currentMesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
-                _meshes.Add(_currentMesh);
-                _vertices.Clear();
-                _vertData.Clear();
-                _indices.Clear();
-
-                _vertices.Add(new Vector3(_job.AddedElements[0].Position.x, _job.AddedElements[0].Position.y));
-                _vertData.Add(new Vector4(_job.AddedElements[0].Distance / (float)VerticesPerMesh, _job.AddedElements[0].Winding, 0, 0));
-                _indices.Add(0);
-            }
-
-            foreach (var element in _job.AddedElements) {
-                var end = element.Position + _job.Directions[element.Winding & 3];
-                var pos = new Vector3(end.x, end.y, 0);
-
-                _vertices.Add(pos);
-                _vertData.Add(new Vector4(element.Distance / (float)VerticesPerMesh, element.Winding, 0, 0));
-                _indices.Add(_vertices.Count - 1);
-            }
-
-            _currentMesh.SetVertices(_vertices);
-            _currentMesh.SetUVs(0, _vertData);
-            _currentMesh.SetIndices(_indices, MeshTopology.LineStrip, 0);
-
-            if (_vertices.Count >= VerticesPerMesh) {
-                _currentMesh = null;
-            }
+            //Only update meshes if we actually stepped, since we use the most recently
+            //added elements to update the current mesh
+            UpdateMeshes();
         }
 
-        Material.SetFloat("_MaxDistance", _job.Distance[0] / (float)VerticesPerMesh);
-        Material.SetFloat("_FadeDist", FadeTime * StepsPerSecond / (float)VerticesPerMesh);
-
-        foreach (var mesh in _meshes) {
-            Graphics.DrawMesh(mesh, Matrix4x4.identity, Material, 0);
-        }
-
-        Camera.transform.position = Vector3.Lerp(Camera.transform.position, new Vector3(_job.Position[0].x, _job.Position[0].y, 0), CameraPositionLerp);
+        Camera.transform.position = Vector3.Lerp(Camera.transform.position, new Vector3(_job.StateRef.Value.Position.x, _job.StateRef.Value.Position.y, 0), CameraPositionLerp);
         Camera.orthographicSize *= Mathf.Pow(CameraZoomDelta, -Input.mouseScrollDelta.y);
     }
 
-    private void OnDrawGizmos() {
-        //if (!Application.isPlaying) {
-        //    return;
-        //}
+    private void UpdateMeshes() {
+        if (CurrentMesh == null) {
+            CurrentMesh = new Mesh();
+            CurrentMesh.name = "Render Mesh " + Meshes.Count;
+            CurrentMesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
 
-        //foreach (var pair in _job.Map.HashMap) {
-        //    var pos = new Vector3(pair.Key.x, pair.Key.y, 0);
-        //    var winding = pair.Value.Winding;
-        //    var relevance = _job.Distance[0] - pair.Value.Distance;
-        //    var dir = _job.Directions[winding & 3];
+            Meshes.Add(CurrentMesh);
 
-        //    float wow = Mathf.Clamp01((RelevanceScale - relevance) / RelevanceScale);
+            _vertices.Clear();
+            _vertData.Clear();
+            _indices.Clear();
 
-        //    //Gizmos.color = Color.HSVToRGB((winding & 31) / 32.0f % 1.0f, 1.0f, 1.0f);
-        //    Gizmos.color = Color.HSVToRGB(pair.Value.Distance / DistanceScale % 1.0f, wow, wow);
-        //    Gizmos.DrawLine(pos, pos + new Vector3(dir.x, dir.y, 0));
-        //}
+            _vertices.Add(new Vector3(_job.AddedElements[0].Position.x, _job.AddedElements[0].Position.y));
+            _vertData.Add(new Vector4(_job.AddedElements[0].Distance / (float)VerticesPerMesh, _job.AddedElements[0].Winding, 0, 0));
+            _indices.Add(0);
+        }
+
+        foreach (var element in _job.AddedElements) {
+            var end = element.Position + _job.Directions[element.Winding & 3];
+            var pos = new Vector3(end.x, end.y, 0);
+
+            _vertices.Add(pos);
+            _vertData.Add(new Vector4(element.Distance / (float)VerticesPerMesh, element.Winding, 0, 0));
+            _indices.Add(_vertices.Count - 1);
+        }
+
+        CurrentMesh.SetVertices(_vertices);
+        CurrentMesh.SetUVs(0, _vertData);
+        CurrentMesh.SetIndices(_indices, MeshTopology.LineStrip, 0);
+
+        if (_vertices.Count >= VerticesPerMesh) {
+            CurrentMesh = null;
+        }
+    }
+
+    private void Render() {
+        Material.SetFloat("_MaxDistance", _job.StateRef.Value.Distance / (float)VerticesPerMesh);
+        Material.SetFloat("_FadeDist", FadeTime * StepsPerSecond / VerticesPerMesh);
+
+        foreach (var mesh in Meshes) {
+            Graphics.DrawMesh(mesh, Matrix4x4.identity, Material, 0);
+        }
     }
 
     private void OnGUI() {
@@ -173,93 +163,94 @@ public class RandomWalk : MonoBehaviour {
 
         public Map Map;
         public NativeArray<int2> Directions;
-        public NativeArray<int> ValidWindings;
 
         public NativeList<Element> AddedElements;
 
-        public NativeArray<int2> Position;
-        public NativeArray<int> Winding;
-        public NativeArray<int> Distance;
-
         public int StepsToTake;
 
-        public Unity.Mathematics.Random R;
+        public NativeReference<SimState> StateRef;
 
         public void Execute() {
+            var state = StateRef.Value;
+            var possibilities = new NativeArray<int>(4, Allocator.Temp);
+
             AddedElements.Clear();
             for (; StepsToTake > 0; StepsToTake--) {
-
-                int2 pos = Position[0];
-
-                int validWindings = 0;
+                int possibilitiesCount = 0;
                 for (int i = 0; i < 3; i++) {
-                    int newWinding = Winding[0] + (i - 1);
+                    int newWinding = state.Winding + (i - 1);
 
                     int2 forwardDir = Directions[newWinding & 3];
                     int2 normalDir = new int2(-forwardDir.y, forwardDir.x);
 
-                    //Easy reject
-                    if (Map[pos + forwardDir].IsOccupied) {
+                    //Easy reject if the position right in front is occupied
+                    if (Map[state.Position + forwardDir].IsOccupied) {
                         continue;
                     }
 
-                    var leftA = Map[pos + normalDir];
-                    var leftB = Map[pos + normalDir + forwardDir];
-                    var leftC = Map[pos + normalDir - forwardDir];
+                    //Now we need to validate the edges to our left and right to see if we are going
+                    //to get ourselves trapped in a loop
+                    bool isLeftSideValid = true;
+                    bool isRightSideValid = true;
 
-                    if (leftA.IsOccupied && RelativeWinding(leftA, newWinding) > 3) {
+                    //We need to check all 3 edges for both sides, since any of them could end
+                    //up trapping us if we take a step forward
+
+                    for (int j = -1; j <= 1; j++) {
+                        var leftCell = Map[state.Position + normalDir + forwardDir * j];
+                        if (leftCell.IsOccupied && RelativeWinding(leftCell, newWinding) > 3) {
+                            isLeftSideValid = false;
+                            break;
+                        }
+                    }
+
+                    if (!isLeftSideValid) {
                         continue;
                     }
 
-                    if (leftB.IsOccupied && RelativeWinding(leftB, newWinding) > 3) {
+                    for (int j = -1; j <= 1; j++) {
+                        var rightCell = Map[state.Position - normalDir + forwardDir * j];
+                        if (rightCell.IsOccupied && RelativeWinding(rightCell, newWinding) < -3) {
+                            isRightSideValid = false;
+                            break;
+                        }
+                    }
+
+                    if (!isRightSideValid) {
                         continue;
                     }
 
-                    if (leftC.IsOccupied && RelativeWinding(leftC, newWinding) > 3) {
-                        continue;
-                    }
-
-                    var rightA = Map[pos - normalDir];
-                    var rightB = Map[pos - normalDir + forwardDir];
-                    var rightC = Map[pos - normalDir - forwardDir];
-
-                    if (rightA.IsOccupied && RelativeWinding(rightA, newWinding) < -3) {
-                        continue;
-                    }
-
-                    if (rightB.IsOccupied && RelativeWinding(rightB, newWinding) < -3) {
-                        continue;
-                    }
-
-                    if (rightC.IsOccupied && RelativeWinding(rightC, newWinding) < -3) {
-                        continue;
-                    }
-
-                    ValidWindings[validWindings++] = newWinding;
+                    possibilities[possibilitiesCount++] = newWinding;
                 }
 
-                if (validWindings == 0) {
+                //We have run into a dead end!  This should not happen in practice
+                if (possibilitiesCount == 0) {
                     break;
                 }
 
-                int chosenWinding = ValidWindings[R.NextInt(validWindings)];
+                //Choose a random winding from the set of valid windings
+                int chosenWinding = possibilities[state.R.NextInt(possibilitiesCount)];
 
-                Map[Position[0]] = new Cell() {
+                Map[state.Position] = new Cell() {
                     IsOccupied = true,
                     Winding = chosenWinding,
-                    Distance = Distance[0]
+                    Distance = state.Distance
                 };
 
                 AddedElements.Add(new Element() {
-                    Position = Position[0],
+                    Position = state.Position,
                     Winding = chosenWinding,
-                    Distance = Distance[0]
+                    Distance = state.Distance
                 });
 
-                Position[0] += Directions[chosenWinding & 3];
-                Winding[0] = chosenWinding;
-                Distance[0]++;
+                state.Position += Directions[chosenWinding & 3];
+                state.Winding = chosenWinding;
+                state.Distance++;
             }
+
+            //Remember to assign the state back to the reference when we are done
+            possibilities.Dispose();
+            StateRef.Value = state;
         }
 
         private int RelativeWinding(Cell cell, int winding) {
@@ -267,20 +258,33 @@ public class RandomWalk : MonoBehaviour {
         }
     }
 
+    //Just a small wrapper around a hash map to act like an infinite grid
     public struct Map {
 
-        public NativeHashMap<int2, Cell> HashMap;
+        private NativeHashMap<int2, Cell> _map;
+
+        public Map(Allocator allocator) {
+            _map = new NativeHashMap<int2, Cell>(4096, allocator);
+        }
+
+        public void Dispose() {
+            _map.Dispose();
+        }
+
+        public void Clear() {
+            _map.Clear();
+        }
 
         public Cell this[int2 position] {
             get {
-                if (HashMap.TryGetValue(position, out var cell)) {
+                if (_map.TryGetValue(position, out var cell)) {
                     return cell;
                 } else {
                     return default;
                 }
             }
             set {
-                HashMap[position] = value;
+                _map[position] = value;
             }
         }
     }
@@ -297,5 +301,10 @@ public class RandomWalk : MonoBehaviour {
         public int Distance;
     }
 
-
+    public struct SimState {
+        public int2 Position;
+        public int Winding;
+        public int Distance;
+        public Unity.Mathematics.Random R;
+    }
 }
